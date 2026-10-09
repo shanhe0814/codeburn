@@ -6,6 +6,7 @@ import { QUOTA_CADENCES, subscribeSettings, writeSettings, type AppSettings } fr
 import { homePath } from '../lib/platform'
 import { Field, Group, Note, Pane, Row, Select, Switch } from './controls'
 import { CheckCircleIcon, KeySlashIcon, RetryIcon, WarningIcon, XIcon } from '../components/Icons'
+import { labels, t } from '../i18n'
 
 /// One pane per provider the CLI has a live quota adapter for, from the mac's
 /// ClaudeSettingsTab / CodexSettingsTab / ... and GenericProviderSettingsTab.
@@ -27,8 +28,9 @@ const GUIDANCE: Record<string, string> = {
   cursor: 'Sign in to the Cursor app, then click Retry.',
   zai: 'Sign in with the Pi CLI, or set ZAI_API_KEY, then click Retry.',
   grok: 'Sign in with the Grok CLI, then click Retry.',
-  clinepass: 'Set CLINEPASS_API_KEY, then click Retry.',
+  clinepass: 'Sign in with Cline (run `cline auth`), or set CLINEPASS_API_KEY, then click Retry.',
   devin: 'Run the Devin CLI once to sign in, then click Retry.',
+  commandcode: 'Sign in with the Command Code CLI, then click Retry.',
 }
 
 /// The mac's "How it works" sections, with the Windows paths. Every one of these is
@@ -43,8 +45,9 @@ const HOW_IT_WORKS: Record<string, string> = {
   cursor: 'Cursor quota opens the Cursor editor state database read-only for its access token, then asks cursor.com. Nothing is written back, so an expired token can only be refreshed by signing in to Cursor again.',
   zai: 'Z.ai quota uses a supplied API key if there is one, and otherwise the Z.ai login the Pi CLI keeps in %USERPROFILE%\\.pi\\agent\\auth.json.',
   grok: 'Grok Build quota reads %USERPROFILE%\\.grok\\auth.json, preferring the current OIDC scope over an older sign-in entry.',
-  clinepass: 'ClinePass has no local login file, so the only credential is an API key.',
+  clinepass: 'ClinePass quota uses CLINEPASS_API_KEY or CLINE_API_KEY if set, and otherwise the Cline sign-in in %USERPROFILE%\\.cline\\data\\settings\\providers.json, read-only. Only Cline refreshes that sign-in, so if it shows as expired, run cline once and click Retry.',
   devin: 'Devin quota reads the plan status the Devin CLI caches in %USERPROFILE%\\.cache\\devin\\cli, read-only. Nothing is sent anywhere and no API key is used, so the numbers are as fresh as the CLI\'s last run.',
+  commandcode: 'Command Code quota reads the API key the Command Code CLI keeps in %USERPROFILE%\\.commandcode\\auth.json, read-only, and asks Command Code for the 5-hour and weekly windows and the credits left.',
 }
 
 type Props = {
@@ -56,30 +59,30 @@ type Props = {
 export function ProviderPane({ id, name, quota }: Props) {
   const summary = summaryFor(quota, id)
   const connection: Connection | null = summary?.connection ?? null
-  const guidance = GUIDANCE[id] ?? 'Sign in with the provider app or CLI, then click Retry.'
+  const guidance = t(GUIDANCE[id] ?? 'Sign in with the provider app or CLI, then click Retry.')
 
   const title =
-    connection === 'connected' ? 'Connected'
-      : connection === 'stale' ? 'Refreshing...'
-        : connection === 'loading' ? 'Connecting...'
-          : connection === 'transientFailure' ? 'Retrying'
-            : connection === 'terminalFailure' ? 'Reconnect required'
-              : 'Not connected'
+    connection === 'connected' ? t('Connected')
+      : connection === 'stale' ? t('Refreshing...')
+        : connection === 'loading' ? t('Connecting...')
+          : connection === 'transientFailure' ? t('Retrying')
+            : connection === 'terminalFailure' ? t('Reconnect required')
+              : t('Not connected')
 
   const detail =
     connection === 'connected' || connection === 'stale'
-      ? (summary?.planLabel ? `Plan: ${summary.planLabel}` : 'Live quota is available to the popover and the Capacity Dock.')
+      ? (summary?.planLabel ? t('Plan: %@', summary.planLabel) : t('Live quota is available to the popover and the Capacity Dock.'))
       : connection === 'transientFailure'
-        ? quota.error ?? 'The last refresh failed; the next one is already scheduled.'
+        ? quota.error ?? t('The last refresh failed; the next one is already scheduled.')
         : connection === 'terminalFailure'
           ? [summary?.reason, guidance].filter(Boolean).join(' ')
           : quota.providers.length === 0
-            ? 'Waiting for the first quota reading.'
+            ? t('Waiting for the first quota reading.')
             : guidance
 
   return (
     <Pane>
-      <Group title="Connection" footer={`CodeBurn reads whatever credential ${name} already wrote on this machine. It never copies one into a store of its own.`}>
+      <Group title={t('Connection')} footer={t('CodeBurn reads whatever credential %@ already wrote on this machine. It never copies one into a store of its own.', name)}>
         <div className="stg-row">
           <div className="stg-conn">
             <span className={`stg-conn-icon stg-conn-${connection ?? 'disconnected'}`}>
@@ -100,7 +103,7 @@ export function ProviderPane({ id, name, quota }: Props) {
               disabled={quota.loading}
               onClick={() => { void refreshQuota() }}
             >
-              {quota.loading ? 'Checking...' : 'Retry'}
+              {quota.loading ? t('Checking...') : t('Retry')}
             </button>
           </div>
         </div>
@@ -119,8 +122,8 @@ export function ProviderPane({ id, name, quota }: Props) {
 
       <QuotaCadence />
 
-      <Group title="How it works">
-        <Note>{HOW_IT_WORKS[id] ?? `${name} quota comes from the codeburn CLI, which reads the credential the provider's own tools left on this machine.`}</Note>
+      <Group title={t('How it works')}>
+        <Note>{HOW_IT_WORKS[id] ? t(HOW_IT_WORKS[id]) : t("%@ quota comes from the codeburn CLI, which reads the credential the provider's own tools left on this machine.", name)}</Note>
       </Group>
     </Pane>
   )
@@ -147,7 +150,7 @@ function ClaudeConfigDirs() {
 
   const add = async () => {
     const picked = await invoke<string | null>('pick_directory', {
-      title: 'Choose a Claude config directory (one containing a projects folder).',
+      title: t('Choose a Claude config directory (one containing a projects folder).'),
     }).catch(() => null)
     if (!picked || dirs.includes(picked)) return
     void apply([...dirs, picked])
@@ -155,11 +158,11 @@ function ClaudeConfigDirs() {
 
   return (
     <Group
-      title="Config Directories"
-      footer={`Aggregate usage across several Claude config directories, for instance work and personal accounts. Empty tracks just the default ${homePath('.claude')}. The CLAUDE_CONFIG_DIRS environment variable, when set, overrides this list.`}
+      title={t('Config Directories')}
+      footer={t('Aggregate usage across several Claude config directories, for instance work and personal accounts. Empty tracks just the default %@. The CLAUDE_CONFIG_DIRS environment variable, when set, overrides this list.', homePath('.claude'))}
     >
       {dirs.length === 0 ? (
-        <Note>No extra directories. Tracking the default {homePath('.claude')}.</Note>
+        <Note>{t('No extra directories. Tracking the default %@.', homePath('.claude'))}</Note>
       ) : (
         dirs.map((dir, index) => (
           <Row
@@ -169,8 +172,8 @@ function ClaudeConfigDirs() {
               <button
                 type="button"
                 className="btn btn-icon"
-                title="Remove"
-                aria-label={`Remove ${dir}`}
+                title={t('Remove')}
+                aria-label={t('Remove %@', dir)}
                 onClick={() => apply(dirs.filter((_, i) => i !== index))}
               >
                 <XIcon size={11} />
@@ -180,7 +183,7 @@ function ClaudeConfigDirs() {
         ))
       )}
       {error && <Note><span className="stg-error">{error}</span></Note>}
-      <Row control={<button type="button" className="btn" onClick={add}>Add Directory...</button>} />
+      <Row control={<button type="button" className="btn" onClick={add}>{t('Add Directory...')}</button>} />
     </Group>
   )
 }
@@ -207,11 +210,11 @@ function CursorSync() {
 
   if (enabled === null) return null
   return (
-    <Group title="Usage Sync" footer="CodeBurn downloads your own usage export with the Cursor app's login, at most once an hour.">
+    <Group title={t('Usage Sync')} footer={t("CodeBurn downloads your own usage export with the Cursor app's login, at most once an hour.")}>
       <Row
-        label="Sync Cursor usage from cursor.com"
+        label={t('Sync Cursor usage from cursor.com')}
         hint={enabled && envOff ? 'Turned off by CODEBURN_CURSOR_SYNC=0' : undefined}
-        control={<Switch on={enabled && !envOff} disabled={enabled && envOff} onToggle={() => { void toggle() }} ariaLabel="Sync Cursor usage from cursor.com" />}
+        control={<Switch on={enabled && !envOff} disabled={enabled && envOff} onToggle={() => { void toggle() }} ariaLabel={t('Sync Cursor usage from cursor.com')} />}
       />
       {error && <Note><span className="stg-error">{error}</span></Note>}
     </Group>
@@ -250,27 +253,27 @@ function ProviderKey({ id, name }: { id: string; name: string }) {
 
   return (
     <Group
-      title="API key"
-      footer="On Windows the key is encrypted for this account with DPAPI, so the file is worthless on another machine or under another sign-in; on Linux it sits in a file only your user can read. It is passed to the codeburn CLI as an environment variable and is never written to a command line or a log."
+      title={t('API key')}
+      footer={t('On Windows the key is encrypted for this account with DPAPI, so the file is worthless on another machine or under another sign-in; on Linux it sits in a file only your user can read. It is passed to the codeburn CLI as an environment variable and is never written to a command line or a log.')}
     >
       <Row
-        label={has ? 'A key is stored' : 'No key stored'}
-        hint={has ? `${name} quota is read with the key saved on this machine.` : `Paste a ${name} API key to read live quota.`}
+        label={has ? t('A key is stored') : t('No key stored')}
+        hint={has ? t('%@ quota is read with the key saved on this machine.', name) : t('Paste a %@ API key to read live quota.', name)}
         control={
           <button type="button" className="btn" disabled={!has || busy} onClick={() => save('')}>
-            Clear
+            {t('Clear')}
           </button>
         }
       />
       <Row
         stacked
-        label="Paste a key"
+        label={t('Paste a key')}
         control={
           <>
             <Field
               secure
-              ariaLabel={`${name} API key`}
-              placeholder={has ? 'Replace the stored key' : 'API key'}
+              ariaLabel={t('%@ API key', name)}
+              placeholder={has ? t('Replace the stored key') : t('API key')}
               value={draft}
               onChange={setDraft}
               width={280}
@@ -299,14 +302,14 @@ function QuotaCadence() {
   if (!settings) return null
 
   return (
-    <Group title="Quota Refresh">
+    <Group title={t('Quota Refresh')}>
       <Row
-        label="Update every"
+        label={t('Update every')}
         control={
           <Select
-            ariaLabel="Quota refresh cadence"
+            ariaLabel={t('Quota refresh cadence')}
             value={settings.quotaCadenceSeconds}
-            options={QUOTA_CADENCES}
+            options={labels(QUOTA_CADENCES)}
             onChange={quotaCadenceSeconds => writeSettings({ quotaCadenceSeconds })}
           />
         }

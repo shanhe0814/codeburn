@@ -298,6 +298,20 @@ describe('notFoundStage (non-sensitive telemetry enum for a not-found)', () => {
     expect(notFoundStage()).toBe('bundled-missing')
   })
 
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('reports bundled-denied when the bundled CLI exists but cannot be stat-ed', () => {
+    delete process.env.CODEBURN_BIN
+    const locked = join(dir, 'locked')
+    mkdirSync(locked)
+    writeFileSync(join(locked, 'launch.js'), '')
+    chmodSync(locked, 0o000)
+    process.env.CODEBURN_BUNDLED_CLI = join(locked, 'launch.js')
+    try {
+      expect(notFoundStage()).toBe('bundled-denied')
+    } finally {
+      chmodSync(locked, 0o755)
+    }
+  })
+
   it('reports bin-not-absolute for a relative CODEBURN_BIN override', () => {
     process.env.CODEBURN_BIN = 'relative/codeburn'
     delete process.env.CODEBURN_BUNDLED_CLI
@@ -329,6 +343,22 @@ describe('spawnSpecFor (bundled CLI runs via Electron-as-node)', () => {
     // PATH is still augmented (the bundle's own dir leads), harmless for a CLI
     // that itself shells out during pairing/sync.
     expect((spec.env.PATH ?? '').split(delimiter)[0]).toBe('/res/cli/dist')
+  })
+
+  it('runs the bundle with CODEBURN_NODE_BIN instead, as plain Node, when a host names one', () => {
+    const saved = process.env.CODEBURN_NODE_BIN
+    process.env.CODEBURN_NODE_BIN = '/usr/local/bin/node'
+    try {
+      const spec = spawnSpecFor({ kind: 'bundled', entry: '/res/cli/dist/launch.js' }, ['serve', '--stdio'])
+      expect(spec.bin).toBe('/usr/local/bin/node')
+      expect(spec.args).toEqual(['/res/cli/dist/launch.js', 'serve', '--stdio'])
+      expect(spec.env.ELECTRON_RUN_AS_NODE).toBeUndefined()
+      process.env.CODEBURN_NODE_BIN = 'node'
+      expect(spawnSpecFor({ kind: 'bundled', entry: '/res/cli/dist/launch.js' }, []).bin).toBe(process.execPath)
+    } finally {
+      if (saved === undefined) delete process.env.CODEBURN_NODE_BIN
+      else process.env.CODEBURN_NODE_BIN = saved
+    }
   })
 
   it('spawns an external CLI directly, with no run-as-node flag', () => {
@@ -444,7 +474,7 @@ describe('spawnCli', () => {
 
   it('rejects with kind "nonzero" on a non-zero exit', async () => {
     fakeBin('fail.js', 'process.stderr.write("boom"); process.exit(2)')
-    await expect(spawnCli(['status'])).rejects.toMatchObject({ kind: 'nonzero' } satisfies Partial<CliError>)
+    await expect(spawnCli(['status'])).rejects.toMatchObject({ kind: 'nonzero', exit: '2' } satisfies Partial<CliError>)
   })
 
   it('rejects with kind "bad-json" on non-JSON stdout', async () => {

@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { describe, it, expect, beforeAll, afterEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest'
 
 import {
   findUnpricedModels,
@@ -30,6 +30,7 @@ import {
   snapshotPricingState,
   restorePricingState,
   pricingModelAt,
+  isStandInPricedAt,
 } from '../src/models.js'
 import { getDailyCacheConfigHash } from '../src/usage-aggregator.js'
 import snapshotData from '../src/data/litellm-snapshot.json' with { type: 'json' }
@@ -101,6 +102,17 @@ describe('getModelCosts', () => {
     expect(getModelCosts('unknown/deepseek-v4-flash')).toBeNull()
     expect(getModelCosts('z-ai/glm-5.2')).not.toBeNull()
     expect(getModelCosts('z-ai/glm-5.3')!.inputCostPerToken).toBe(zai[0])
+  })
+
+  it('prices Mistral Large 4 at the preview rate, not the 2024 bare mistral-large row', () => {
+    for (const id of ['mistral-large-4-0', 'mistral-large-2610', 'mistral-large-4']) {
+      expect(calculateCost(id, 1_000_000, 1_000_000, 0, 1_000_000, 0)).toBeCloseTo(0.68 + 2.09 + 0.07, 12)
+    }
+    expect(calculateCost('mistral-large', 1_000_000, 1_000_000, 0, 0, 0)).toBeCloseTo(16, 12)
+  })
+
+  it('prices deepseek-v3.2 at DeepSeek\'s published $0.28 / $0.42 / $0.028 hit', () => {
+    expect(calculateCost('deepseek-v3.2', 1_000_000, 1_000_000, 0, 1_000_000, 0)).toBeCloseTo(0.28 + 0.42 + 0.028, 12)
   })
 
   it('prices gpt-5.6-codex and gpt-5.6-codex-max, sourced directly from the snapshot (#1077)', () => {
@@ -422,9 +434,20 @@ describe('getModelCosts', () => {
 
   describe('grok-4.6 prompt tier', () => {
     it('uses the low tier below 200000 prompt tokens', () => {
-      // Base input is 1.25e-6 since LiteLLM's 2026-09 reprice (was 2e-6); the
-      // tier rates above 200k are unchanged, so only this literal moved.
-      expect(calculateCost('grok-4.6', 100_000, 10_000, 0, 99_999, 0)).toBeCloseTo(0.2349995, 12)
+      expect(calculateCost('grok-4.6', 100_000, 10_000, 0, 99_999, 0)).toBeCloseTo(0.3099995, 12)
+    })
+
+    // The bare id takes `xai/grok-4.6` ($2/M input), not `azure_ai/grok-4.6`
+    // ($1.25/M); xAI's rate is what GitHub Copilot bills (three real
+    // requests: 29,549 in, 946 out, 57,472 cached).
+    it('prices at xAI list rates, matching GitHub Copilot\'s charge', () => {
+      expect(calculateCost('grok-4.6', 29_549, 946, 0, 57_472, 0)).toBeCloseTo(9_351_000_000 / 1e11, 12)
+      const xai = getModelCosts('xai/grok-4.6')!
+      expect(getModelCosts('grok-4.6')).toMatchObject({
+        inputCostPerToken: xai.inputCostPerToken,
+        outputCostPerToken: xai.outputCostPerToken,
+        cacheReadCostPerToken: xai.cacheReadCostPerToken,
+      })
     })
 
     it('uses the high tier for every token at exactly 200000 prompt tokens', () => {
@@ -550,7 +573,7 @@ describe('resolveCanonicalModelId', () => {
     expect(resolveCanonicalModelId('gpt-5-fast')).toBe('gpt-5')
     expect(resolveCanonicalModelId('gpt-5-untracked-xyz')).toBe('gpt-5-untracked-xyz')
     expect(resolveCanonicalModelId('claude-opus-4.6')).toBe('claude-opus-4-6')
-    expect(resolveCanonicalModelId('kimi-code')).toBe('kimi-k2-thinking')
+    expect(resolveCanonicalModelId('kimi-code')).toBe('kimi-k2.7-code')
     expect(resolveCanonicalModelId('cline-pass/kimi-k3')).toBe('kimi-k3')
     expect(resolveCanonicalModelId('orcarouter/auto')).not.toBe(resolveCanonicalModelId('claude-sonnet-4-5'))
     expect(resolveCanonicalModelId('orcarouter/fusion')).toBe(resolveCanonicalModelId('openai/gpt-oss-120b'))
@@ -1174,6 +1197,79 @@ describe('Cursor model variants resolve to pricing', () => {
   })
 })
 
+describe('Kimi Code moving alias', () => {
+  const rates = (model: string) => {
+    const c = getModelCosts(model)!
+    return [c.inputCostPerToken * 1e6, c.cacheReadCostPerToken * 1e6, c.outputCostPerToken * 1e6].map(v => +v.toFixed(4))
+  }
+
+  it('prices kimi-for-coding by the model it served on the call date', () => {
+    expect(pricingModelAt('kimi-for-coding', '2026-01-26T23:59:59.999Z')).toBe('kimi-k2-thinking')
+    expect(pricingModelAt('kimi-for-coding', '2026-01-27T00:00:00.000Z')).toBe('kimi-k2.5')
+    expect(pricingModelAt('kimi-for-coding', '2026-04-12T23:59:59.999Z')).toBe('kimi-k2.5')
+    expect(pricingModelAt('kimi-for-coding', '2026-04-13T00:00:00.000Z')).toBe('kimi-k2.6')
+    expect(pricingModelAt('kimi-for-coding', '2026-06-11T23:59:59.999Z')).toBe('kimi-k2.6')
+    expect(pricingModelAt('kimi-for-coding', '2026-06-12T00:00:00.000Z')).toBe('kimi-for-coding')
+    expect(pricingModelAt('kimi-for-coding', '2026-09-27T10:00:00Z')).toBe('kimi-for-coding')
+    expect(pricingModelAt('kimi-code', '2026-03-01T00:00:00Z')).toBe('kimi-k2.5')
+    expect(pricingModelAt('kimi-for-coding', undefined)).toBe('kimi-for-coding')
+    expect(pricingModelAt('kimi-for-coding', 'not a date')).toBe('kimi-for-coding')
+    expect(pricingModelAt('kimi-for-coding-highspeed', '2026-03-01T00:00:00Z')).toBe('kimi-for-coding-highspeed')
+    expect(pricingModelAt('k3', '2026-03-01T00:00:00Z')).toBe('k3')
+  })
+
+  it('resolves each period to Moonshot list prices ($/M input, cache hit, output)', () => {
+    expect(rates('kimi-k2.5')).toEqual([0.6, 0.1, 3])
+    expect(rates('kimi-k2.6')).toEqual([0.95, 0.16, 4])
+    expect(rates('kimi-for-coding')).toEqual([0.95, 0.19, 4])
+    expect(rates('kimi-code')).toEqual([0.95, 0.19, 4])
+    expect(rates('kimi-for-coding-highspeed')).toEqual([1.9, 0.38, 8])
+    expect(rates('k3')).toEqual([3, 0.3, 15])
+  })
+
+  it('treats highspeed as priced, not a flat-rate SKU', () => {
+    expect(isFlatRateModel('kimi-for-coding-highspeed')).toBe(false)
+    expect(calculateCost('kimi-for-coding-highspeed', 1_000_000, 1_000_000, 0, 1_000_000, 0)).toBeCloseTo(10.28)
+  })
+
+  it('marks only the K2.8 Preview period (from 11 Sep 2026) as stand-in priced', () => {
+    expect(isStandInPricedAt('kimi-for-coding', '2026-09-10T23:59:59.999Z')).toBe(false)
+    expect(isStandInPricedAt('kimi-for-coding', '2026-09-11T00:00:00.000Z')).toBe(true)
+    expect(isStandInPricedAt('kimi-code', '2026-09-27T10:00:00Z')).toBe(true)
+    expect(isStandInPricedAt('kimi-for-coding', '2026-07-01T00:00:00Z')).toBe(false)
+    expect(isStandInPricedAt('kimi-for-coding', '2026-03-01T00:00:00Z')).toBe(false)
+    expect(isStandInPricedAt('kimi-for-coding', undefined)).toBe(true)
+    expect(isStandInPricedAt('kimi-for-coding-highspeed', '2026-09-27T10:00:00Z')).toBe(false)
+    expect(isStandInPricedAt('k3', '2026-09-27T10:00:00Z')).toBe(false)
+    setModelAliases({ 'kimi-for-coding': 'kimi-k3' })
+    try {
+      expect(isStandInPricedAt('kimi-for-coding', '2026-09-27T10:00:00Z')).toBe(false)
+    } finally {
+      setModelAliases({})
+    }
+  })
+
+  it('keeps the alias name for display', () => {
+    expect(getShortModelName('kimi-for-coding')).toBe('Kimi for Coding')
+    expect(getShortModelName('kimi-for-coding-highspeed')).toBe('Kimi for Coding HighSpeed')
+  })
+
+  it('lets a user alias or price override win over the date rule', () => {
+    setModelAliases({ 'kimi-for-coding': 'kimi-k3' })
+    try {
+      expect(pricingModelAt('kimi-for-coding', '2026-03-01T00:00:00Z')).toBe('kimi-for-coding')
+    } finally {
+      setModelAliases({})
+    }
+    setPriceOverrides({ 'kimi-for-coding': { input: 1, output: 2 } })
+    try {
+      expect(pricingModelAt('kimi-for-coding', '2026-03-01T00:00:00Z')).toBe('kimi-for-coding')
+    } finally {
+      setPriceOverrides({})
+    }
+  })
+})
+
 describe('Codex activity ids (#1047)', () => {
   it('keeps the activity label instead of collapsing to the underlying model name', () => {
     expect(getShortModelName('codex-auto-review')).toBe('Codex Auto Review')
@@ -1420,6 +1516,58 @@ describe('DeepSeek v4 models resolve to pricing', () => {
       expect(getModelCosts('deepseek-v4-pro')!.inputCostPerToken).toBe(1.32e-6)
       expect(getModelCosts('deepseek-v4-flash')!.inputCostPerToken).toBe(3e-7)
     } finally {
+      await rm(cacheRoot, { recursive: true, force: true })
+      await loadPricing()
+    }
+  })
+})
+
+describe('live fetch bare-id claims', () => {
+  it('gives a bare id the maker\'s price over a reseller\'s, and a priced reseller row over a $0 one', async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), 'codeburn-pricing-live-'))
+    const prevDir = process.env['CODEBURN_CACHE_DIR']
+    const prevSnapshotOnly = process.env['CODEBURN_PRICING_SNAPSHOT_ONLY']
+    const row = (input: number, output: number) => ({ input_cost_per_token: input, output_cost_per_token: output })
+    const source = {
+      'azure_ai/grok-x-live': row(1.25e-6, 6e-6),
+      'xai/grok-x-live': row(2e-6, 6e-6),
+      'xai/grok-y-live': row(2e-6, 6e-6),
+      'azure_ai/grok-y-live': row(1.25e-6, 6e-6),
+      'codestral/codestral-x-live': row(0, 0),
+      'mistral/codestral-x-live': row(0.3e-6, 0.9e-6),
+      'ollama/free-only-live': row(0, 0),
+      'deepinfra/gemma-free-live': row(0.15e-6, 0.6e-6),
+      'gemini/gemma-free-live': row(0, 0),
+      'azure_ai/resold-live': row(1e-6, 3e-6),
+      'fireworks_ai/resold-live': row(2e-6, 4e-6),
+      'openrouter/openai/sol-live': row(2e-6, 10e-6),
+      'perplexity/openai/sol-live': row(4e-6, 20e-6),
+      'reseller/direct-live': row(9e-6, 9e-6),
+      'direct-live': row(1e-6, 2e-6),
+    }
+    try {
+      process.env['CODEBURN_CACHE_DIR'] = cacheRoot
+      delete process.env['CODEBURN_PRICING_SNAPSHOT_ONLY']
+      vi.stubGlobal('fetch', async () => new Response(JSON.stringify(source)))
+      await loadPricing()
+      const rates = (id: string) => {
+        const c = getModelCosts(id)!
+        return [c.inputCostPerToken, c.outputCostPerToken]
+      }
+      expect(rates('grok-x-live')).toEqual([2e-6, 6e-6])
+      expect(rates('grok-y-live')).toEqual([2e-6, 6e-6])
+      expect(rates('azure_ai/grok-x-live')).toEqual([1.25e-6, 6e-6])
+      expect(rates('codestral-x-live')).toEqual([0.3e-6, 0.9e-6])
+      expect(rates('free-only-live')).toEqual([0, 0])
+      expect(rates('gemma-free-live')).toEqual([0, 0])
+      expect(rates('resold-live')).toEqual([1e-6, 3e-6])
+      expect(rates('openai/sol-live')).toEqual([2e-6, 10e-6])
+      expect(rates('direct-live')).toEqual([1e-6, 2e-6])
+    } finally {
+      vi.unstubAllGlobals()
+      if (prevDir === undefined) delete process.env['CODEBURN_CACHE_DIR']
+      else process.env['CODEBURN_CACHE_DIR'] = prevDir
+      if (prevSnapshotOnly !== undefined) process.env['CODEBURN_PRICING_SNAPSHOT_ONLY'] = prevSnapshotOnly
       await rm(cacheRoot, { recursive: true, force: true })
       await loadPricing()
     }
@@ -1712,8 +1860,6 @@ describe('findUnpricedModels', () => {
       { model: 'auto-genius', calls: 898, cost: 0, tokens: 35_300_000 },
       { model: 'cline-pass/auto-genius', calls: 4, cost: 0, tokens: 33_900 },
       { model: 'auto', calls: 449, cost: 0, tokens: 17_700_000 },
-      { model: 'kimi-for-coding-highspeed', calls: 12, cost: 0, tokens: 3_400_000 },
-      { model: 'moonshot/kimi-for-coding-highspeed', calls: 2, cost: 0, tokens: 80_000 },
       { model: 'grok-composer-2.5-fast', calls: 10, cost: 0, tokens: 1_900_000 },
       { model: 'Grok Composer 2.5 Fast', calls: 10, cost: 0, tokens: 1_900_000 },
       { model: 'Warp Auto (efficient)', calls: 3, cost: 0, tokens: 50_000 },
@@ -1753,7 +1899,7 @@ describe('findUnpricedModels', () => {
     expect(isExpectedFreeModel('warp-auto-efficient')).toBe(false)
     expect(isExpectedFreeModel('auto-genius')).toBe(true)
     expect(isExpectedFreeModel('auto')).toBe(true)
-    expect(isExpectedFreeModel('kimi-for-coding-highspeed')).toBe(true)
+    expect(isExpectedFreeModel('kimi-for-coding-highspeed')).toBe(false)
     expect(isExpectedFreeModel('warp')).toBe(false)
     expect(isExpectedFreeModel('codex-auto-review')).toBe(false)
     expect(isExpectedFreeModel('zz-mystery-paid-model-999')).toBe(false)

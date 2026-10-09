@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type WheelEvent } from 'react'
 import type { MenubarPayload } from '../lib/payload'
 import type { CurrencyState } from '../lib/currency'
-import { formatCompactCurrency, formatCurrency, plural } from '../lib/currency'
+import { formatCompactCurrency, formatCurrency, isEstimatedCost } from '../lib/currency'
 import { severity, summaryFor, type QuotaState, type QuotaSummary } from '../lib/quota'
 import { WATCHED_TOOLS, watchedSource } from '../lib/watched'
 import { ChevronRight } from './Icons'
 import { QuotaPopover } from './QuotaPopover'
+import { t } from '../i18n'
 
 /// Any provider id the CLI reports, plus `all`. The CLI's own ids are what `--provider`
 /// accepts, so a tab built from the payload is directly usable as a filter argument.
@@ -23,6 +24,7 @@ export type ProviderTab = {
   /// False only for a known tool the payload never mentioned: it stays visible, dimmed,
   /// so a first-time reader can see what CodeBurn watches for.
   detected: boolean
+  estimatedCostUSD?: number
   /// Where CodeBurn would find this tool, shown in the hover preview when it is missing.
   source: string | null
 }
@@ -44,6 +46,7 @@ const PROVIDER_COLORS: Record<string, string> = {
   claude: '#C9521D',
   cline: '#238A7E',
   codewhale: '#38BDF8',
+  'command-code': '#10B981',
   codex: '#4A7D5C',
   cursor: '#3F6B8C',
   'cursor-agent': '#4EC9B0',
@@ -87,7 +90,7 @@ export function providerTabs(payload: MenubarPayload | null): ProviderTab[] {
     const total = sorted.reduce((sum, d) => sum + d.cost, 0)
     return [
       { id: ALL_PROVIDER, label: 'All', cost: total, detected: true, source: 'every detected tool' },
-      ...sorted.map(d => ({ id: d.id, label: d.label, cost: d.cost, detected: true, source: null })),
+      ...sorted.map(d => ({ id: d.id, label: d.label, cost: d.cost, detected: true, estimatedCostUSD: d.estimatedCostUSD, source: null })),
     ]
   }
   const legacy = payload?.current.providers ?? {}
@@ -204,13 +207,13 @@ export function AgentTabStrip({ selected, onSelect, payload, currency, quota }: 
             type="button"
             className="tab-chevron"
             disabled={index <= 0}
-            aria-label="Show previous providers"
+            aria-label={t('Show previous providers')}
             onClick={() => step(-1)}
           >
             <ChevronRight size={11} style={{ transform: 'rotate(180deg)' }} />
           </button>
         )}
-        <nav className="agent-tabs" aria-label="Provider" ref={scroller} onWheel={onWheel}>
+        <nav className="agent-tabs" aria-label={t('Provider')} ref={scroller} onWheel={onWheel}>
           <div className="agent-tabs-content" ref={content}>
             {tabs.map(tab => {
               const active = selected === tab.id
@@ -233,9 +236,9 @@ export function AgentTabStrip({ selected, onSelect, payload, currency, quota }: 
                   }}
                 >
                   <span className="tab-chip">
-                    <span className="tab-label">{tab.label}</span>
+                    <span className="tab-label">{tab.label === 'All' ? t('All') : tab.label}</span>
                     {tab.detected && tab.cost > 0 && (
-                      <span className="tab-cost">{formatCompactCurrency(tab.cost, currency)}</span>
+                      <span className="tab-cost">{isEstimatedCost(tab.cost, tab.estimatedCostUSD, formatCompactCurrency(tab.cost, currency)) ? '~' : ''}{formatCompactCurrency(tab.cost, currency)}</span>
                     )}
                   </span>
                   {summary && <QuotaCapsule quota={summary} active={active} />}
@@ -249,7 +252,7 @@ export function AgentTabStrip({ selected, onSelect, payload, currency, quota }: 
             type="button"
             className="tab-chevron"
             disabled={index >= tabs.length - 1}
-            aria-label="Show next providers"
+            aria-label={t('Show next providers')}
             onClick={() => step(1)}
           >
             <ChevronRight size={11} />
@@ -301,18 +304,18 @@ function previewFor(id: Provider, tabs: ProviderTab[], currency: CurrencyState):
   const others = tabs.filter(t => t.id !== ALL_PROVIDER && t.detected)
   const total = tabs.find(t => t.id === ALL_PROVIDER)?.cost ?? 0
   if (id === ALL_PROVIDER) {
-    if (others.length === 0) return { title: 'No tools detected yet', body: 'Run one of the supported tools once, then refresh.' }
+    if (others.length === 0) return { title: t('No tools detected yet'), body: t('Run one of the supported tools once, then refresh.') }
     return {
-      title: `${formatCurrency(total, currency)} today across ${plural(others.length, 'tool')}`,
-      body: others.map(t => `${t.label} ${formatCompactCurrency(t.cost, currency)}`).join(' · '),
+      title: t('%1$@ today across %2$@', formatCurrency(total, currency), others.length === 1 ? t('%1$@ tool', 1) : t('%1$@ tools', others.length)),
+      body: others.map(tool => `${tool.label} ${formatCompactCurrency(tool.cost, currency)}`).join(' · '),
     }
   }
   if (!tab.detected) {
-    return { title: `${tab.label} not detected on this machine`, body: `CodeBurn watches ${tab.source ?? 'this tool'}.` }
+    return { title: t('%1$@ not detected on this machine', tab.label), body: t('CodeBurn watches %@.', t(tab.source ?? 'this tool')) }
   }
   const share = total > 0 ? Math.round((tab.cost / total) * 100) : 0
   return {
-    title: `${tab.label} · ${formatCurrency(tab.cost, currency)} today`,
-    body: tab.cost > 0 ? `${share}% of today's spend · click to filter every view` : 'No spend yet today · click to filter every view',
+    title: t('%1$@ · %2$@ today', tab.label, formatCurrency(tab.cost, currency)),
+    body: tab.cost > 0 ? t("%@%% of today's spend · click to filter every view", share) : t('No spend yet today · click to filter every view'),
   }
 }

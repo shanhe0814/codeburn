@@ -5,8 +5,8 @@ import { homedir } from 'os'
 import { CATEGORY_LABELS, type ProjectSummary, type TaskCategory } from './types.js'
 import { formatCost as baseCost, getCurrency } from './currency.js'
 import { findUnpricedModels, modelRowKey, unpricedModelHint } from './models.js'
-import { callBillableOutputTokens, sessionBillableOutputTokens, sessionModelBillableOutputTokens } from './session-output.js'
-import { markEstimated, excludedGatewayNote } from './format.js'
+import { callBillableOutputTokens, countSessions, sessionBillableOutputTokens, sessionModelBillableOutputTokens } from './session-output.js'
+import { markEstimated, excludedGatewayNote, isEstimatedCost, ESTIMATED_COST_LEGEND } from './format.js'
 import { AGGREGATE_ONLY_PROVIDER } from './parser.js'
 import { maxOf } from './math-utils.js'
 import { formatSessionCount, SESSION_COUNT_HELP, type SessionCountBasis } from './session-count-label.js'
@@ -15,6 +15,7 @@ import { normalizeAbsProjectPathKey } from './parser.js'
 import { dateKey } from './day-aggregator.js'
 import type { DailyEntry } from './daily-cache.js'
 import type { BudgetStatus, BudgetTier } from './budget.js'
+import { folderNameOriginKey, isTemporaryProjectPath, linkedOriginKey, originRepoName, projectOriginKey, TEMPORARY_PROJECTS } from './git-origin.js'
 
 // Display-only helpers. The shared formatters omit thousands separators and
 // abbreviate; here we show full, comma-grouped numbers so the tables read like
@@ -161,17 +162,21 @@ export function renderOverview(
   const byCat = new Map<string, { cost: number; turns: number }>()
   const byTool = new Map<string, number>()
   const byDay = new Map<string, { cost: number; tokens: number; providers: Set<string> }>()
-  const byProject = new Map<string, { cost: number; sessions: number; sample: ProjectSummary }>()
+  const byProject = new Map<string, { cost: number; sessions: number; sample: ProjectSummary; repo?: string; byFolderName?: boolean }>()
 
+  sessions = countSessions(projects)
   for (const p of projects) {
     cost += p.totalCostUSD
     savings += p.totalSavingsUSD
     calls += p.totalApiCalls
-    sessions += p.sessions.length
-    const pkey = projectAggKey(p)
-    const pe = byProject.get(pkey) ?? { cost: 0, sessions: 0, sample: p }
+    const realOrigin = linkedOriginKey(p.projectPath) ?? projectOriginKey(p.projectPath)
+    const origin = realOrigin ?? folderNameOriginKey(p.projectPath)
+    const temporary = !origin && isTemporaryProjectPath(p.projectPath)
+    const pkey = origin ? `origin:${origin}` : temporary ? TEMPORARY_PROJECTS : projectAggKey(p)
+    const pe = byProject.get(pkey) ?? { cost: 0, sessions: 0, sample: p, ...(origin ? { repo: originRepoName(origin) } : temporary ? { repo: 'Temporary folders' } : {}) }
     pe.cost += p.totalCostUSD
     pe.sessions += p.sessions.length
+    if (origin && !realOrigin) pe.byFolderName = true
     byProject.set(pkey, pe)
     for (const s of p.sessions) {
       inTok += s.totalInputTokens
@@ -339,10 +344,10 @@ export function renderOverview(
     out.push(heading('Top models'))
     out.push(renderTable(c,
       [{ header: 'Model' }, { header: 'Cost', right: true }, { header: 'Calls', right: true }, { header: 'Tokens', right: true }],
-      modelRows.map(([m, v]) => [modelRowKey(m), markEstimated(formatCost(v.cost), v.estimatedCost > 0), formatCount(v.calls), formatTokens(v.tokens)]),
+      modelRows.map(([m, v]) => [modelRowKey(m), markEstimated(formatCost(v.cost), isEstimatedCost(v.cost, v.estimatedCost, formatCost(v.cost))), formatCount(v.calls), formatTokens(v.tokens)]),
     ))
-    if (modelRows.some(([, v]) => v.estimatedCost > 0)) {
-      out.push('  ' + c.dim('~ estimated cost (priced from estimated tokens)'))
+    if (modelRows.some(([, v]) => isEstimatedCost(v.cost, v.estimatedCost, formatCost(v.cost)))) {
+      out.push('  ' + c.dim(ESTIMATED_COST_LEGEND))
     }
     out.push('')
   }
@@ -369,8 +374,9 @@ export function renderOverview(
     out.push(heading('Top projects'))
     out.push(renderTable(c,
       [{ header: 'Project' }, { header: 'Cost', right: true }, { header: 'Sessions', right: true }],
-      projRows.map(([key, v]) => [disambiguatedProjectLabel(key, v.sample, basenameCounts), formatCost(v.cost), formatCount(v.sessions)]),
+      projRows.map(([key, v]) => [(v.repo ?? disambiguatedProjectLabel(key, v.sample, basenameCounts)) + (v.byFolderName ? ' *' : ''), formatCost(v.cost), formatCount(v.sessions)]),
     ))
+    if (projRows.some(([, v]) => v.byFolderName)) out.push(c.dim('* includes deleted folders matched by folder name'))
     out.push('')
   }
 

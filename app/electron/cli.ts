@@ -42,6 +42,8 @@ export type NotFoundStage =
   | 'bin-not-executable'
   | 'bundled-not-absolute'
   | 'bundled-missing'
+  | 'bundled-denied'
+  | 'bundled-unreadable'
   | 'spawn-error'
   | 'no-path-match'
 
@@ -50,11 +52,14 @@ export class CliError extends Error {
   readonly kind: CliErrorKind
   /** For `not-found` only: the non-sensitive stage enum. Undefined otherwise. */
   readonly detail?: NotFoundStage
-  constructor(kind: CliErrorKind, message: string, detail?: NotFoundStage) {
+  /** A one-shot child's exit code, or the signal that ended it. Undefined on the serve path. */
+  readonly exit?: string
+  constructor(kind: CliErrorKind, message: string, detail?: NotFoundStage, exit?: string) {
     super(message)
     this.name = 'CliError'
     this.kind = kind
     this.detail = detail
+    this.exit = exit
   }
 }
 
@@ -339,6 +344,9 @@ export function spawnEnvFor(bin: string): NodeJS.ProcessEnv {
  */
 /** A script run by this process's own runtime: Electron's binary acting as Node. */
 function nodeSpec(entry: string, args: string[]): SpawnSpec {
+  // A host whose own runtime is too old for the CLI (an IDE's Electron) names a real Node.
+  const node = process.env.CODEBURN_NODE_BIN
+  if (node && isAbsolute(node)) return { bin: node, args: [entry, ...args], env: spawnEnvFor(entry) }
   return {
     bin: process.execPath,
     args: [entry, ...args],
@@ -547,9 +555,22 @@ export function notFoundStage(): NotFoundStage {
   const bundled = process.env.CODEBURN_BUNDLED_CLI
   if (bundled) {
     if (!isAbsolute(bundled)) return 'bundled-not-absolute'
-    if (!isFile(bundled)) return 'bundled-missing'
+    if (!isFile(bundled)) return bundledStatStage(bundled)
   }
   return 'no-path-match'
+}
+
+// isFile() swallows the errno: ENOENT is a vanished bundle, EACCES/EPERM one we were refused.
+function bundledStatStage(p: string): NotFoundStage {
+  try {
+    statSync(p)
+    return 'bundled-missing'
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === 'ENOENT' || code === 'ENOTDIR') return 'bundled-missing'
+    if (code === 'EACCES' || code === 'EPERM') return 'bundled-denied'
+    return 'bundled-unreadable'
+  }
 }
 
 /** Ask a child to exit, then insist. See {@link KILL_GRACE_MS}. The child is
@@ -654,10 +675,10 @@ function runCli(spec: SpawnSpec, cmdLabel: string, timeoutMs: number, onStderr?:
       finish(() => reject(new CliError('not-found', err.message, 'spawn-error')))
     })
 
-    child.on('close', code => {
+    child.on('close', (code, signal) => {
       finish(() => {
         if (code !== 0) {
-          reject(new CliError('nonzero', withoutProgressLines(stderr) || `codeburn exited with code ${code}`))
+          reject(new CliError('nonzero', withoutProgressLines(stderr) || `codeburn exited with code ${code}`, undefined, signal ?? String(code)))
           return
         }
         try {
@@ -1030,6 +1051,15 @@ export function startServe(pidFile?: string): void {
   serveClient.start()
 }
 
+/** Replace the resident child with one spawned for the current target, e.g.
+ *  after the Node.js it runs on changed. */
+export function restartServe(pidFile?: string): void {
+  const child = serveClient?.destroy()
+  serveClient = null
+  if (child) retireWithFlush(child)
+  startServe(pidFile)
+}
+
 /**
  * Best-effort reap of a serve child orphaned by a previous run (an app crash
  * leaves no one to close its stdin). Reads the pid recorded by
@@ -1141,7 +1171,8 @@ export function spawnCli(
   // first real query before its ready frame, making that request the single
   // cache warm-up. CODEBURN_PROGRESS is compatible because startServe sets it
   // on the resident child; any other per-call env needs an isolated one-shot.
-  if (SERVE_ROUTED.has(args[0] ?? '') && isServeCompatibleEnv(opts.extraEnv)) {
+  // `--why` returns transcript content, which must not land in serve's output memo.
+  if (SERVE_ROUTED.has(args[0] ?? '') && !args.includes('--why') && isServeCompatibleEnv(opts.extraEnv)) {
     const serve = serveClient
     // Recover lazily from an unexpected child death. start() is synchronous and
     // idempotent, and the client's consecutive-death budget prevents an endlessly
