@@ -20,7 +20,8 @@ final class CapacityDockProviderQuotaService {
         // No defaults here: only `.live` may reach the real adapters, so a
         // test can never silently read the local Cursor session or hit the
         // network by omitting a field.
-        var refreshClinePass: @Sendable (String) async throws -> QuotaSummary
+        var refreshClinePass: @Sendable (String?) async throws -> QuotaSummary
+        var refreshCommandCode: @Sendable () async throws -> QuotaSummary
         var refreshCursor: @Sendable () async throws -> QuotaSummary
         var refreshDevin: @Sendable () async throws -> QuotaSummary
         var refreshGrok: @Sendable () async throws -> QuotaSummary
@@ -31,6 +32,9 @@ final class CapacityDockProviderQuotaService {
         static let live = Dependencies(
             refreshClinePass: { apiKey in
                 try await ClinePassSubscriptionService.refresh(apiKey: apiKey)
+            },
+            refreshCommandCode: {
+                try await CommandCodeSubscriptionService.refresh()
             },
             refreshCursor: {
                 try await CursorSubscriptionService.refresh()
@@ -99,14 +103,16 @@ final class CapacityDockProviderQuotaService {
                 throw CapacityDockProviderFetchFailure(error: error)
             }
         case "clinepass":
-            guard let apiKey = credential.sanitizedOverride.apiKey else {
-                throw CapacityDockProviderFetchFailure(
-                    message: ClinePassSubscriptionService.FetchError.noCredentials.localizedDescription,
-                    disposition: .terminal
-                )
-            }
             do {
-                return try await dependencies.refreshClinePass(apiKey)
+                return try await dependencies.refreshClinePass(credential.sanitizedOverride.apiKey)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw CapacityDockProviderFetchFailure(error: error)
+            }
+        case "commandcode":
+            do {
+                return try await dependencies.refreshCommandCode()
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -148,6 +154,10 @@ enum CapacityDockProviderFetchFailureDisposition: Equatable, Sendable {
 struct CapacityDockProviderFetchFailure: LocalizedError, Equatable, Sendable {
     let message: String
     let disposition: CapacityDockProviderFetchFailureDisposition
+    /// A short status shown instead of the generic one for this failure.
+    var statusTitle: String?
+    /// The message variant for when a Retry button is on screen.
+    var retryMessage: String?
 
     init(message: String, disposition: CapacityDockProviderFetchFailureDisposition) {
         self.message = message
@@ -155,17 +165,44 @@ struct CapacityDockProviderFetchFailure: LocalizedError, Equatable, Sendable {
     }
 
     init(error: Error) {
+        switch error {
+        case ClinePassSubscriptionService.FetchError.noCredentials,
+             CommandCodeSubscriptionService.FetchError.noCredentials,
+             CursorSubscriptionService.FetchError.noCredentials,
+             DevinSubscriptionService.FetchError.noCache,
+             GrokBuildSubscriptionService.FetchError.noCredentials,
+             GrokBotSubscriptionService.FetchError.noCredentials,
+             GrokBotSubscriptionService.FetchError.notInstalled,
+             ZaiSubscriptionService.FetchError.noCredentials,
+             ZcodeSubscriptionService.FetchError.noCredentials:
+            notSignedIn = true
+        default:
+            break
+        }
         message = error.localizedDescription
         disposition = Self.disposition(for: error)
+        statusTitle = (error as? ClinePassSubscriptionService.FetchError)?.statusTitle
+        retryMessage = (error as? ClinePassSubscriptionService.FetchError)?.retryMessage
     }
 
     var errorDescription: String? { message }
+
+    /// No credentials or local app data at all, as opposed to a failed check.
+    var notSignedIn = false
 
     static func disposition(for error: Error) -> CapacityDockProviderFetchFailureDisposition {
         if let failure = error as? CapacityDockProviderFetchFailure {
             return failure.disposition
         }
         if let error = error as? ClinePassSubscriptionService.FetchError {
+            switch error.classification {
+            case .terminalAuth:
+                return .terminal
+            case .transient, .parseFailure:
+                return .transient
+            }
+        }
+        if let error = error as? CommandCodeSubscriptionService.FetchError {
             switch error.classification {
             case .terminalAuth:
                 return .terminal

@@ -267,6 +267,40 @@ describe('Cursor import through the report pipeline', () => {
     expect(await parse(whole)).toEqual(before)
   })
 
+  it('a synced export drops a CLI session it billed even when the transcript was written after its newest event', async () => {
+    // A `cursor-agent -p` run: one tagged prompt before the export's newest
+    // event, its transcript written after it.
+    const prompt = new Date(Date.parse(iso(2, 21)))
+    const tag = `${prompt.toLocaleString('en-US', { weekday: 'long', timeZone: 'UTC' })}, ${prompt.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })} (UTC)`
+    const dir = join(homedir(), '.cursor', 'projects', 'proj', 'agent-transcripts', 'aaaaaaaa-0000-4000-8000-000000000001')
+    await mkdir(dir, { recursive: true })
+    const path = join(dir, 'aaaaaaaa-0000-4000-8000-000000000001.jsonl')
+    const step = JSON.stringify({ role: 'assistant', message: { content: [{ type: 'text', text: 'x'.repeat(400) }] } })
+    await writeFile(path, [JSON.stringify({ role: 'user', message: { content: [{ type: 'text', text: `<timestamp>${tag}</timestamp>\n<user_query>redacted</user_query>` }] } }), step, step].join('\n') + '\n')
+    const written = Date.parse(iso(2, 23))
+    await utimes(path, written / 1000, written / 1000)
+    expect((await parse(whole))['cursor-agent']!.calls).toBe(2)
+
+    await importCursorCsvText(csv(ROWS), Date.now(), { from: base, source: 'sync', account: 'a' })
+    const after = await parse(whole)
+    expect(after['cursor-agent']).toBeUndefined()
+    expect(after['cursor']!.calls).toBe(4)
+  })
+
+  it('marks plan rows estimated only where the export names no real model', async () => {
+    await importCursorCsv(csvPath)
+    clearSessionCache()
+    const flags: Record<string, boolean> = {}
+    for (const p of await parseAllSessions(whole, 'all')) for (const s of p.sessions) for (const t of s.turns) for (const c of t.assistantCalls) flags[c.model] = c.isEstimated === true
+    expect(flags).toEqual({
+      'cursor-auto': true,
+      'claude-opus-5-thinking-high': false,
+      'grok-4.6-high': false,
+      'grok-bot-automation': true,
+      'composer-2.5-fast': false,
+    })
+  })
+
   it('the daily cache re-derives the covered days after an import and after removal', async () => {
     await writeAgentTranscript('inside', base + DAY + 5 * 3_600_000)
     await writeAgentTranscript('outside', base - 5 * DAY)
@@ -334,15 +368,16 @@ describe('Cursor import coverage in a non-UTC zone', () => {
 })
 
 describe('invalidateProviderDays', () => {
+  const day = (date: string): DailyEntry => ({
+    date, cost: 3, savingsUSD: 0, calls: 3, sessions: 2, inputTokens: 30, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+    editTurns: 0, oneShotTurns: 0, models: {}, categories: {},
+    providers: {
+      cursor: { calls: 1, cost: 1, savingsUSD: 0, sessions: 1, inputTokens: 10 },
+      claude: { calls: 2, cost: 2, savingsUSD: 0, sessions: 1, inputTokens: 20 },
+    },
+  })
+
   it('drops only the named providers on the named days and pulls the watermark back', async () => {
-    const day = (date: string): DailyEntry => ({
-      date, cost: 3, savingsUSD: 0, calls: 3, sessions: 2, inputTokens: 30, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
-      editTurns: 0, oneShotTurns: 0, models: {}, categories: {},
-      providers: {
-        cursor: { calls: 1, cost: 1, savingsUSD: 0, sessions: 1, inputTokens: 10 },
-        claude: { calls: 2, cost: 2, savingsUSD: 0, sessions: 1, inputTokens: 20 },
-      },
-    })
     await saveDailyCache({ ...emptyCache(), complete: true, lastComputedDate: dayOf(5), days: [day(dayOf(0)), day(dayOf(2)), day(dayOf(4))] })
     await invalidateProviderDays(['cursor'], dayOf(1), dayOf(3))
     const c = await loadDailyCache()
@@ -352,5 +387,14 @@ describe('invalidateProviderDays', () => {
       [dayOf(2), ['claude'], 2],
       [dayOf(4), ['cursor', 'claude'], 3],
     ])
+  })
+
+  it('reaches days held only by an older daily-cache file', async () => {
+    const dir = process.env['CODEBURN_CACHE_DIR']!
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'daily-cache.v60.json'), JSON.stringify({ ...emptyCache(), version: 60, complete: true, lastComputedDate: dayOf(5), days: [day(dayOf(2))] }))
+    await invalidateProviderDays(['cursor'], dayOf(1), dayOf(3))
+    const c = await loadDailyCache()
+    expect(c.days.map(d => [d.date, Object.keys(d.providers)])).toEqual([[dayOf(2), ['claude']]])
   })
 })
